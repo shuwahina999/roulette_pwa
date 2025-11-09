@@ -248,6 +248,19 @@ const setupFreeInputHandlers = () => {
     updateWheel();
   });
 
+  dom.freeInputs.addEventListener('focusin', (event) => {
+    if (!event.target.matches('.entry-input')) {
+      return;
+    }
+    const { id } = event.target.dataset;
+    if (isLastFreeEntry(id)) {
+      const structureChanged = ensureFreeEntryStructure({ forceTrailingBlank: true });
+      if (structureChanged) {
+        syncFreeInputsList();
+      }
+    }
+  });
+
   dom.freeInputs.addEventListener('focusout', (event) => {
     if (!event.target.matches('.entry-input')) {
       return;
