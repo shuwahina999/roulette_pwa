@@ -294,10 +294,8 @@ const setupFreeInputHandlers = () => {
     }
     const { id } = event.target.dataset;
     state.freeEntries = state.freeEntries.filter((entry) => entry.id !== id);
-    const structureChanged = ensureFreeEntryStructure({ forceTrailingBlank: true });
-    if (structureChanged) {
-      renderFreeInputs();
-    }
+    ensureFreeEntryStructure({ forceTrailingBlank: true });
+    syncFreeInputsList();
     updateWheel();
   });
 };
