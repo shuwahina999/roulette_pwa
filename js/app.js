@@ -293,9 +293,13 @@ const setupFreeInputHandlers = () => {
       return;
     }
     const { id } = event.target.dataset;
-    state.freeEntries = state.freeEntries.filter((entry) => entry.id !== id);
+    const targetIndex = state.freeEntries.findIndex((entry) => entry.id === id);
+    if (targetIndex === -1) {
+      return;
+    }
+    state.freeEntries.splice(targetIndex, 1);
     ensureFreeEntryStructure({ forceTrailingBlank: true });
-    syncFreeInputsList();
+    renderFreeInputs();
     updateWheel();
   });
 };
