@@ -1,19 +1,20 @@
 const THEME_STORAGE_KEY = 'smart-roulette-theme';
 const HISTORY_STORAGE_KEY = 'smart-roulette-history';
+const AUTO_HISTORY_STORAGE_KEY = 'smart-roulette-auto-history';
 const MAX_HISTORY_ITEMS = 20;
+const MAX_AUTO_HISTORY_ITEMS = 50;
 const WEIGHT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 const dom = {
   body: document.body,
   menuToggle: document.getElementById('menuToggle'),
   sidePanel: document.getElementById('sidePanel'),
-  modeButtons: {
-    free: document.getElementById('modeFree'),
-    range: document.getElementById('modeRange')
-  },
-  modeSections: {
+  tabButtons: Array.from(document.querySelectorAll('.tab-btn')),
+  sections: {
     free: document.getElementById('freeMode'),
-    range: document.getElementById('rangeMode')
+    range: document.getElementById('rangeMode'),
+    saved: document.getElementById('savedMode'),
+    history: document.getElementById('historyMode')
   },
   freeInputs: document.getElementById('freeInputs'),
   rangeForm: document.getElementById('rangeForm'),
@@ -23,27 +24,219 @@ const dom = {
   rangePreview: document.getElementById('rangePreview'),
   wheelCanvas: document.getElementById('wheelCanvas'),
   wheelWrapper: document.querySelector('.wheel-wrapper'),
+  wheelSection: document.querySelector('.wheel-section'),
   spinButton: document.getElementById('spinButton'),
   spinResult: document.getElementById('spinResult'),
   historyList: document.getElementById('historyList'),
-  saveHistory: document.getElementById('saveHistory'),
   clearHistory: document.getElementById('clearHistory'),
-  themeButtons: Array.from(document.querySelectorAll('.theme-btn'))
+  autoHistoryList: document.getElementById('autoHistoryList'),
+  saveCurrentButtons: Array.from(document.querySelectorAll('[data-action="save-current"]')),
+  themeButtons: Array.from(document.querySelectorAll('.theme-btn')),
+  toast: document.getElementById('toast')
 };
+
+const TAB_KEYS = ['free', 'range', 'saved', 'history'];
+const tabButtonGroups = TAB_KEYS.reduce((groups, key) => {
+  groups[key] = [];
+  return groups;
+}, {});
+
+dom.tabButtons.forEach((button) => {
+  const tab = button.dataset.tab;
+  if (!tab || !tabButtonGroups[tab]) {
+    return;
+  }
+  tabButtonGroups[tab].push(button);
+});
 
 const state = {
   mode: 'free',
+  activeTab: 'free',
   freeEntries: [],
   rangeConfig: { start: 1, end: 4, step: 1 },
   rangeEntries: [],
   rangeWeights: {},
   history: [],
+  autoHistory: [],
   wheelSegments: [],
   currentRotation: 0,
-  isSpinning: false
+  isSpinning: false,
+  wheelStates: {
+    free: { rotation: 0, result: '' },
+    range: { rotation: 0, result: '' }
+  },
+  wheelPendingRestores: {
+    free: false,
+    range: false
+  }
 };
 
 let idCounter = 0;
+let toastTimeoutId = null;
+
+const normalizeRotation = (angle = 0) => ((Number(angle) % 360) + 360) % 360;
+
+if (typeof window !== 'undefined' && !Array.isArray(window.__pendingToasts)) {
+  window.__pendingToasts = [];
+}
+
+const RANGE_MESSAGES = {
+  startAdjusted: '開始値が終了値を超えたため、終了値に合わせました。',
+  startAdjustedByEnd: '終了値の変更に合わせて開始値を調整しました。',
+  endAdjusted: '終了値が開始値より小さいため、開始値に合わせました。'
+};
+
+const enforceRangeBounds = ({ source = 'sync', silent = false, adjust = true } = {}) => {
+  if (!dom.rangeStart || !dom.rangeEnd) {
+    return false;
+  }
+
+  let adjusted = false;
+  const startRaw = dom.rangeStart.value;
+  const endRaw = dom.rangeEnd.value;
+  const hasStartValue = startRaw !== '' && !Number.isNaN(Number(startRaw));
+  const hasEndValue = endRaw !== '' && !Number.isNaN(Number(endRaw));
+  const startValue = hasStartValue ? Number(startRaw) : null;
+  const endValue = hasEndValue ? Number(endRaw) : null;
+
+  if (hasStartValue && startValue !== null) {
+    dom.rangeEnd.min = String(startValue);
+  } else {
+    dom.rangeEnd.removeAttribute('min');
+  }
+
+  if (!hasEndValue || endValue === null) {
+    dom.rangeStart.removeAttribute('max');
+  } else {
+    dom.rangeStart.max = String(endValue);
+  }
+
+  if (adjust && hasStartValue && hasEndValue && startValue !== null && endValue !== null) {
+    if (source === 'start' && endValue < startValue) {
+      dom.rangeEnd.value = String(startValue);
+      adjusted = true;
+      if (!silent) {
+        showToast(RANGE_MESSAGES.endAdjusted);
+      }
+    } else if (source === 'end' && startValue > endValue) {
+      dom.rangeStart.value = String(endValue);
+      adjusted = true;
+      if (!silent) {
+        showToast(RANGE_MESSAGES.startAdjustedByEnd);
+      }
+    } else if (source === 'sync' && startValue > endValue) {
+      dom.rangeStart.value = String(endValue);
+      dom.rangeEnd.value = String(endValue);
+      adjusted = true;
+      if (!silent) {
+        showToast(RANGE_MESSAGES.startAdjusted);
+      }
+    }
+  }
+
+  return adjusted;
+};
+
+const hideToast = () => {
+  if (!dom.toast) return;
+  dom.toast.classList.remove('visible');
+  dom.toast.setAttribute('aria-hidden', 'true');
+  toastTimeoutId = null;
+};
+
+const showToast = (message) => {
+  if (!dom.toast) return;
+  dom.toast.textContent = message;
+  dom.toast.setAttribute('aria-hidden', 'false');
+  dom.toast.classList.add('visible');
+  if (toastTimeoutId) {
+    window.clearTimeout(toastTimeoutId);
+  }
+  toastTimeoutId = window.setTimeout(() => {
+    hideToast();
+  }, 2000);
+};
+
+const setWheelTransform = (angle, { immediate = false } = {}) => {
+  if (!dom.wheelWrapper) return;
+  if (immediate) {
+    dom.wheelWrapper.classList.add('no-transition');
+  }
+  dom.wheelWrapper.style.transform = `rotate(${angle}deg)`;
+  if (immediate) {
+    void dom.wheelWrapper.offsetWidth;
+    dom.wheelWrapper.classList.remove('no-transition');
+  }
+};
+
+const getWheelState = (mode) => {
+  if (!mode) {
+    return { rotation: 0, result: '' };
+  }
+  if (!state.wheelStates[mode]) {
+    state.wheelStates[mode] = { rotation: 0, result: '' };
+  }
+  return state.wheelStates[mode];
+};
+
+const applyWheelState = (mode) => {
+  if (!mode) return;
+  const wheelState = getWheelState(mode);
+  state.currentRotation = normalizeRotation(Number.isFinite(wheelState.rotation) ? wheelState.rotation : 0);
+  dom.wheelWrapper?.classList.remove('spinning');
+  setWheelTransform(state.currentRotation, { immediate: true });
+  if (dom.spinResult && state.activeTab === mode) {
+    dom.spinResult.textContent = wheelState.result || '';
+  }
+};
+
+const resetWheelDisplay = (mode = state.mode, { updateStore = false } = {}) => {
+  if (!mode) return;
+  state.currentRotation = 0;
+  dom.wheelWrapper?.classList.remove('spinning');
+  setWheelTransform(0, { immediate: true });
+  if (dom.spinResult && state.activeTab === mode) {
+    dom.spinResult.textContent = '';
+  }
+  if (updateStore) {
+    state.wheelStates[mode] = { rotation: 0, result: '' };
+    state.wheelPendingRestores[mode] = false;
+  }
+};
+
+const storeWheelState = (mode = state.mode) => {
+  if (!mode) return;
+  const existing = getWheelState(mode);
+  const resultText = dom.spinResult && state.activeTab === mode ? dom.spinResult.textContent || '' : existing.result || '';
+  if (state.mode === mode) {
+    state.currentRotation = normalizeRotation(state.currentRotation);
+  }
+  const rotation = state.mode === mode ? normalizeRotation(state.currentRotation) : normalizeRotation(existing.rotation || 0);
+  state.wheelStates[mode] = {
+    rotation,
+    result: resultText
+  };
+};
+
+window.addEventListener('app:toast', (event) => {
+  const { detail } = event;
+  const message = typeof detail?.message === 'string' ? detail.message.trim() : '';
+  if (!message) {
+    return;
+  }
+  showToast(message);
+});
+
+window.__toastEmitterReady = true;
+if (Array.isArray(window.__pendingToasts) && window.__pendingToasts.length) {
+  const queued = [...window.__pendingToasts];
+  window.__pendingToasts.length = 0;
+  queued.forEach((message) => {
+    if (typeof message === 'string' && message.trim()) {
+      showToast(message.trim());
+    }
+  });
+}
 
 const createEntry = (value = '', weight = 1) => ({
   id: `entry-${Date.now()}-${idCounter++}`,
@@ -75,7 +268,37 @@ const setupThemeToggle = () => {
 };
 
 const setupMenuToggle = () => {
-  if (!dom.menuToggle) return;
+  if (!dom.menuToggle || !dom.sidePanel) return;
+
+  const handleOutsidePoint = (event) => {
+    if (!dom.sidePanel.classList.contains('open')) {
+      return;
+    }
+    if (!window.matchMedia('(max-width: 1079px)').matches) {
+      return;
+    }
+    if (dom.sidePanel.contains(event.target)) {
+      return;
+    }
+    if (dom.menuToggle.contains(event.target)) {
+      return;
+    }
+    closeMenuOnMobile();
+  };
+
+  const outsideEvent = typeof window !== 'undefined' && 'PointerEvent' in window ? 'pointerdown' : 'mousedown';
+  document.addEventListener(outsideEvent, handleOutsidePoint);
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') {
+      return;
+    }
+    if (!dom.sidePanel.classList.contains('open')) {
+      return;
+    }
+    closeMenuOnMobile();
+  });
+
   dom.menuToggle.addEventListener('click', () => {
     const nextState = !dom.sidePanel.classList.contains('open');
     dom.sidePanel.classList.toggle('open', nextState);
@@ -85,7 +308,7 @@ const setupMenuToggle = () => {
 };
 
 const closeMenuOnMobile = () => {
-  if (window.matchMedia('(max-width: 960px)').matches) {
+  if (window.matchMedia('(max-width: 1079px)').matches) {
     dom.sidePanel.classList.remove('open');
     dom.body.classList.remove('menu-open');
     dom.menuToggle?.setAttribute('aria-expanded', 'false');
@@ -376,9 +599,33 @@ const updateRangeEntries = () => {
 };
 
 const setupRangeHandlers = () => {
-  dom.rangeForm.addEventListener('input', () => {
+  const handleInput = (source) => {
+    enforceRangeBounds({ source, silent: true, adjust: false });
     updateRangeEntries();
-  });
+  };
+
+  const handleBlur = (source) => {
+    enforceRangeBounds({ source });
+    updateRangeEntries();
+  };
+
+  if (dom.rangeStart) {
+    dom.rangeStart.addEventListener('input', () => handleInput('start'));
+    dom.rangeStart.addEventListener('blur', () => handleBlur('start'));
+  }
+
+  if (dom.rangeEnd) {
+    dom.rangeEnd.addEventListener('input', () => handleInput('end'));
+    dom.rangeEnd.addEventListener('blur', () => handleBlur('end'));
+  }
+
+  if (dom.rangeStep) {
+    const handleStepChange = () => {
+      updateRangeEntries();
+    };
+    dom.rangeStep.addEventListener('input', handleStepChange);
+    dom.rangeStep.addEventListener('change', handleStepChange);
+  }
 
   dom.rangePreview.addEventListener('change', (event) => {
     if (event.target.matches('.weight-select')) {
@@ -394,26 +641,85 @@ const initializeRangeMode = () => {
   dom.rangeEnd.value = String(state.rangeConfig.end);
   dom.rangeStep.value = String(state.rangeConfig.step);
   setupRangeHandlers();
+  enforceRangeBounds({ source: 'sync', silent: true });
   updateRangeEntries();
 };
 
-const setMode = (mode) => {
-  state.mode = mode;
-  Object.entries(dom.modeButtons).forEach(([key, button]) => {
-    const isActive = key === mode;
-    button.classList.toggle('active', isActive);
-    button.setAttribute('aria-selected', String(isActive));
+const updateTabUI = () => {
+  Object.entries(tabButtonGroups).forEach(([key, buttons]) => {
+    const isActive = state.activeTab === key;
+    buttons.forEach((button) => {
+      button.classList.toggle('active', isActive);
+      button.setAttribute('aria-selected', String(isActive));
+    });
   });
-  Object.entries(dom.modeSections).forEach(([key, section]) => {
-    section.classList.toggle('hidden', key !== mode);
+  Object.entries(dom.sections).forEach(([key, section]) => {
+    if (!section) return;
+    section.classList.toggle('hidden', state.activeTab !== key);
   });
-  updateWheel();
+  if (dom.wheelSection) {
+    const shouldShowWheel = state.activeTab === 'free' || state.activeTab === 'range';
+    dom.wheelSection.classList.toggle('hidden', !shouldShowWheel);
+  }
+};
+
+const isWheelTab = (value) => value === 'free' || value === 'range';
+
+const setActiveTab = (tab) => {
+  if (!TAB_KEYS.includes(tab)) {
+    return;
+  }
+
+  if (tab === state.activeTab) {
+    if (isWheelTab(tab)) {
+      updateWheel();
+      applyWheelState(tab);
+    }
+    closeMenuOnMobile();
+    return;
+  }
+
+  const previousMode = state.mode;
+  const previousActiveTab = state.activeTab;
+
+  if (isWheelTab(previousActiveTab) && isWheelTab(previousMode)) {
+    storeWheelState(previousMode);
+    state.wheelPendingRestores[previousMode] = true;
+  }
+
+  state.activeTab = tab;
+
+  if (isWheelTab(tab)) {
+    state.mode = tab;
+    updateTabUI();
+    updateWheel();
+    if (state.wheelPendingRestores[tab]) {
+      applyWheelState(tab);
+      state.wheelPendingRestores[tab] = false;
+    } else {
+      resetWheelDisplay(tab, { updateStore: false });
+    }
+  } else {
+    updateTabUI();
+    if (isWheelTab(previousMode)) {
+      state.wheelPendingRestores[previousMode] = true;
+    }
+    if (dom.spinResult) {
+      dom.spinResult.textContent = '';
+    }
+  }
+
   closeMenuOnMobile();
 };
 
-const setupModeSwitch = () => {
-  dom.modeButtons.free.addEventListener('click', () => setMode('free'));
-  dom.modeButtons.range.addEventListener('click', () => setMode('range'));
+const setupTabSwitch = () => {
+  dom.tabButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const { tab } = button.dataset;
+      if (!tab) return;
+      setActiveTab(tab);
+    });
+  });
 };
 
 const getActiveEntries = () => {
@@ -442,6 +748,7 @@ const drawWheel = (entries) => {
   ctx.clearRect(0, 0, width, height);
 
   if (!entries.length) {
+    resetWheelDisplay(state.mode, { updateStore: true });
     ctx.fillStyle = '#d3d3d3';
     ctx.beginPath();
     ctx.arc(width / 2, height / 2, radius - 4, 0, Math.PI * 2);
@@ -514,6 +821,278 @@ const weightedRandomIndex = (entries) => {
   return entries.length - 1;
 };
 
+const formatTimestamp = (timestamp) => {
+  if (!timestamp) return '';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleString();
+};
+
+const getDefaultHistoryName = (mode, timestamp) => {
+  const base = mode === 'free' ? '自由入力' : '範囲指定';
+  const formatted = formatTimestamp(timestamp);
+  return formatted ? `${base} (${formatted})` : base;
+};
+
+const getModeLabel = (mode) => (mode === 'free' ? '自由入力' : '範囲指定');
+
+const cloneFreeEntries = (entries = []) => entries.map((entry) => ({ ...entry }));
+
+const cloneRangeEntries = (entries = []) => (Array.isArray(entries) ? [...entries] : []);
+
+const cloneRangeWeights = (weights = {}) => {
+  const cloned = {};
+  Object.entries(weights || {}).forEach(([key, value]) => {
+    cloned[key] = value;
+  });
+  return cloned;
+};
+
+const captureConfigurationSnapshot = () => ({
+  mode: state.mode,
+  freeEntries: cloneFreeEntries(state.freeEntries),
+  rangeEntries: cloneRangeEntries(state.rangeEntries),
+  rangeConfig: { ...state.rangeConfig },
+  rangeWeights: cloneRangeWeights(state.rangeWeights)
+});
+
+const getSnapshotLabels = (snapshot) => {
+  if (!snapshot) return [];
+  if (snapshot.mode === 'free') {
+    return cloneFreeEntries(snapshot.freeEntries || [])
+      .filter((entry) => typeof entry.value === 'string' && entry.value.trim() !== '')
+      .map((entry) => entry.value.trim());
+  }
+  return cloneRangeEntries(snapshot.rangeEntries || []).map((value) => String(value));
+};
+
+const applyConfigurationSnapshot = (snapshot, { activateTab = true } = {}) => {
+  if (!snapshot) return;
+  const mode = snapshot.mode === 'range' ? 'range' : 'free';
+
+  if (mode === 'free') {
+    state.freeEntries = cloneFreeEntries(snapshot.freeEntries || []);
+    ensureFreeEntryStructure({ forceTrailingBlank: true });
+    renderFreeInputs();
+  } else {
+    const config = snapshot.rangeConfig || state.rangeConfig;
+    state.rangeConfig = {
+      start: Number(config.start ?? 1),
+      end: Number(config.end ?? 4),
+      step: Number(config.step ?? 1) || 1
+    };
+    state.rangeEntries = cloneRangeEntries(snapshot.rangeEntries || []);
+    state.rangeWeights = cloneRangeWeights(snapshot.rangeWeights || {});
+    dom.rangeStart.value = String(state.rangeConfig.start);
+    dom.rangeEnd.value = String(state.rangeConfig.end);
+    dom.rangeStep.value = String(state.rangeConfig.step);
+    enforceRangeBounds({ source: 'sync', silent: true });
+    updateRangeEntries();
+  }
+
+  state.mode = mode;
+  if (activateTab) {
+    if (state.activeTab === mode && (mode === 'free' || mode === 'range')) {
+      resetWheelDisplay(mode, { updateStore: true });
+    }
+    setActiveTab(mode);
+  } else {
+    updateWheel();
+  }
+};
+
+const buildSnapshotFromHistoryItem = (item) => {
+  if (!item) return null;
+  return {
+    mode: item.mode === 'range' ? 'range' : 'free',
+    freeEntries: cloneFreeEntries(item.freeEntries || []),
+    rangeEntries: cloneRangeEntries(item.rangeEntries || []),
+    rangeConfig: { ...item.rangeConfig },
+    rangeWeights: cloneRangeWeights(item.rangeWeights || {})
+  };
+};
+
+const addHistoryItemFromSnapshot = (snapshot, { name, createdAt } = {}) => {
+  if (!snapshot) {
+    return false;
+  }
+  const timestamp = createdAt ?? Date.now();
+  const item = {
+    id: timestamp,
+    createdAt: timestamp,
+    name: name && name.trim() ? name.trim() : getDefaultHistoryName(snapshot.mode, timestamp),
+    mode: snapshot.mode === 'range' ? 'range' : 'free',
+    freeEntries: cloneFreeEntries(snapshot.freeEntries || []),
+    rangeEntries: cloneRangeEntries(snapshot.rangeEntries || []),
+    rangeConfig: { ...snapshot.rangeConfig },
+    rangeWeights: cloneRangeWeights(snapshot.rangeWeights || {})
+  };
+
+  state.history = state.history
+    .concat(item)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, MAX_HISTORY_ITEMS);
+  persistHistory();
+  renderHistory();
+  return true;
+};
+
+const persistAutoHistory = () => {
+  localStorage.setItem(AUTO_HISTORY_STORAGE_KEY, JSON.stringify(state.autoHistory));
+};
+
+const loadAutoHistory = () => {
+  try {
+    const raw = localStorage.getItem(AUTO_HISTORY_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      state.autoHistory = parsed
+        .slice(0, MAX_AUTO_HISTORY_ITEMS)
+        .map((entry) => ({
+          ...entry,
+          mode: entry?.mode || entry?.configuration?.mode || 'free'
+        }));
+      state.autoHistory.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      if (parsed.length > MAX_AUTO_HISTORY_ITEMS) {
+        persistAutoHistory();
+      }
+    }
+  } catch (error) {
+    console.error('自動履歴の読み込みに失敗しました', error);
+  }
+};
+
+const renderAutoHistory = () => {
+  if (!dom.autoHistoryList) {
+    return;
+  }
+  dom.autoHistoryList.innerHTML = '';
+  if (!state.autoHistory.length) {
+    const empty = document.createElement('li');
+    empty.className = 'auto-history-empty';
+    empty.textContent = '履歴はまだありません。';
+    dom.autoHistoryList.append(empty);
+    return;
+  }
+
+  const entries = state.autoHistory
+    .slice()
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .slice(0, MAX_AUTO_HISTORY_ITEMS);
+
+  entries.forEach((entry) => {
+      const li = document.createElement('li');
+      li.className = 'auto-history-item';
+      li.dataset.id = String(entry.id);
+
+      const snapshot = entry.configuration || buildSnapshotFromHistoryItem(entry);
+      const labels = getSnapshotLabels(snapshot);
+      const modeLabel = getModeLabel((snapshot && snapshot.mode) || entry.mode || state.mode);
+      const hasSnapshotData = Boolean(snapshot && labels.length);
+
+      const result = document.createElement('div');
+      result.className = 'auto-history-result';
+      result.textContent = entry.label ? `結果: ${entry.label}` : '結果: -';
+
+      const summary = document.createElement('div');
+      summary.className = 'auto-history-summary';
+      summary.textContent = hasSnapshotData
+        ? labels.slice(0, 5).join(', ') + (labels.length > 5 ? ' …' : '')
+        : '設定情報はありません。';
+
+      const meta = document.createElement('div');
+      meta.className = 'auto-history-meta';
+
+      const modeBadge = document.createElement('span');
+      modeBadge.className = 'auto-history-mode';
+      modeBadge.textContent = modeLabel;
+
+      const time = document.createElement('time');
+      if (entry.createdAt) {
+        time.dateTime = new Date(entry.createdAt).toISOString();
+      }
+      time.textContent = formatTimestamp(entry.createdAt) || '日時不明';
+
+      meta.append(modeBadge, time);
+
+      const actions = document.createElement('div');
+      actions.className = 'auto-history-actions';
+
+      const loadButton = document.createElement('button');
+      loadButton.type = 'button';
+      loadButton.className = 'primary';
+      loadButton.dataset.autoAction = 'load';
+      loadButton.dataset.autoId = String(entry.id);
+      loadButton.textContent = '読み込む';
+      loadButton.disabled = !hasSnapshotData;
+
+      const saveButton = document.createElement('button');
+      saveButton.type = 'button';
+      saveButton.dataset.autoAction = 'save';
+      saveButton.dataset.autoId = String(entry.id);
+      saveButton.textContent = '保存する';
+      saveButton.disabled = !hasSnapshotData;
+
+      actions.append(loadButton, saveButton);
+
+      li.append(result, summary, meta, actions);
+      dom.autoHistoryList.append(li);
+    });
+};
+
+const addAutoHistoryEntry = (label) => {
+  const createdAt = Date.now();
+  const snapshot = captureConfigurationSnapshot();
+  const entry = {
+    id: `${createdAt}-${Math.random().toString(16).slice(2, 10)}`,
+    label,
+    mode: snapshot.mode,
+    createdAt,
+    configuration: snapshot
+  };
+  state.autoHistory.unshift(entry);
+  if (state.autoHistory.length > MAX_AUTO_HISTORY_ITEMS) {
+    state.autoHistory = state.autoHistory.slice(0, MAX_AUTO_HISTORY_ITEMS);
+  }
+  persistAutoHistory();
+  renderAutoHistory();
+};
+
+const getAutoHistoryEntry = (itemId) =>
+  state.autoHistory.find((item) => String(item.id) === String(itemId));
+
+const applyAutoHistoryItem = (itemId) => {
+  const entry = getAutoHistoryEntry(itemId);
+  const snapshot = entry?.configuration;
+  const hasData = snapshot && getSnapshotLabels(snapshot).length;
+  if (!entry || !hasData) {
+    showToast('読み込める履歴がありません。');
+    return;
+  }
+  applyConfigurationSnapshot(snapshot);
+  showToast('履歴の設定を読み込みました。');
+};
+
+const saveAutoHistoryItem = (itemId) => {
+  const entry = getAutoHistoryEntry(itemId);
+  const snapshot = entry?.configuration;
+  const hasData = snapshot && getSnapshotLabels(snapshot).length;
+  if (!entry || !hasData) {
+    showToast('保存できる履歴がありません。');
+    return;
+  }
+  const saved = addHistoryItemFromSnapshot(snapshot, {
+    name: entry.label,
+    createdAt: entry.createdAt
+  });
+  if (saved) {
+    showToast('履歴を保存済みに追加しました。');
+  }
+};
+
 // Applies weighted selection and aligns the chosen slice with the indicator.
 const spinWheel = () => {
   if (state.isSpinning) return;
@@ -527,7 +1106,7 @@ const spinWheel = () => {
   const end = segment.endDeg <= start ? segment.endDeg + 360 : segment.endDeg;
   const randomAngle = start + Math.random() * (end - start);
   const currentRotationMod = ((state.currentRotation % 360) + 360) % 360;
-  const extraTurns = 3 + Math.floor(Math.random() * 3);
+  const extraTurns = Math.floor(Math.random() * 6) + 5;
   let rotationDelta = extraTurns * 360 + (360 - randomAngle) - currentRotationMod;
   rotationDelta = ((rotationDelta % 360) + 360) % 360 + extraTurns * 360;
   const targetRotation = state.currentRotation + rotationDelta;
@@ -540,11 +1119,14 @@ const spinWheel = () => {
   const handleTransitionEnd = (event) => {
     if (event.propertyName !== 'transform') return;
     dom.wheelWrapper.removeEventListener('transitionend', handleTransitionEnd);
-    state.currentRotation = targetRotation % 360;
+    state.currentRotation = normalizeRotation(targetRotation);
     state.isSpinning = false;
     dom.spinButton.disabled = false;
     dom.wheelWrapper.classList.remove('spinning');
     dom.spinResult.textContent = `結果: ${segment.entry.label}`;
+    setWheelTransform(state.currentRotation, { immediate: true });
+    storeWheelState(state.mode);
+    addAutoHistoryEntry(segment.entry.label);
   };
 
   dom.wheelWrapper.addEventListener('transitionend', handleTransitionEnd);
@@ -563,7 +1145,7 @@ const loadHistory = () => {
       state.history = parsed;
     }
   } catch (error) {
-    console.error('履歴の読み込みに失敗しました', error);
+    console.error('保存済み設定の読み込みに失敗しました', error);
   }
 };
 
@@ -586,13 +1168,19 @@ const renderHistory = () => {
 
       const header = document.createElement('div');
       header.className = 'history-item-header';
-      const title = document.createElement('strong');
-      title.textContent = item.mode === 'free' ? '自由入力' : '範囲指定';
-      const timestamp = new Date(item.createdAt).toLocaleString();
+      const titleGroup = document.createElement('div');
+      titleGroup.className = 'history-title-group';
+      const nameElement = document.createElement('strong');
+      nameElement.className = 'history-name';
+      nameElement.textContent = item.name || getDefaultHistoryName(item.mode, item.createdAt);
+      const modeBadge = document.createElement('span');
+      modeBadge.className = 'history-mode-badge';
+      modeBadge.textContent = item.mode === 'free' ? '自由入力' : '範囲指定';
+      titleGroup.append(nameElement, modeBadge);
       const timeSpan = document.createElement('span');
       timeSpan.className = 'history-time';
-      timeSpan.textContent = timestamp;
-      header.append(title, timeSpan);
+      timeSpan.textContent = formatTimestamp(item.createdAt);
+      header.append(titleGroup, timeSpan);
 
       const summary = document.createElement('div');
       summary.className = 'history-summary';
@@ -603,6 +1191,10 @@ const renderHistory = () => {
 
       const actions = document.createElement('div');
       actions.className = 'history-actions';
+      const renameButton = document.createElement('button');
+      renameButton.type = 'button';
+      renameButton.className = 'history-rename';
+      renameButton.textContent = '名前変更';
       const loadButton = document.createElement('button');
       loadButton.type = 'button';
       loadButton.className = 'history-load';
@@ -611,7 +1203,7 @@ const renderHistory = () => {
       deleteButton.type = 'button';
       deleteButton.className = 'history-delete';
       deleteButton.textContent = '削除';
-      actions.append(loadButton, deleteButton);
+      actions.append(renameButton, loadButton, deleteButton);
 
       li.append(header, summary, actions);
       dom.historyList.append(li);
@@ -622,52 +1214,23 @@ const saveCurrentConfiguration = () => {
   const entries = getActiveEntries();
   if (!entries.length) {
     dom.spinResult.textContent = '保存可能な項目がありません。';
+    showToast('保存可能な項目がありません。');
     return;
   }
 
-  const item = {
-    id: Date.now(),
-    createdAt: Date.now(),
-    mode: state.mode,
-    freeEntries: state.freeEntries,
-    rangeEntries: state.rangeEntries,
-    rangeConfig: state.rangeConfig,
-    rangeWeights: state.rangeWeights
-  };
-
-  state.history.push(JSON.parse(JSON.stringify(item)));
-  if (state.history.length > MAX_HISTORY_ITEMS) {
-    state.history = state.history
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, MAX_HISTORY_ITEMS);
+  const snapshot = captureConfigurationSnapshot();
+  const added = addHistoryItemFromSnapshot(snapshot);
+  if (added) {
+    showToast('現在の設定を保存しました。');
   }
-  persistHistory();
-  renderHistory();
-  dom.spinResult.textContent = '現在の設定を保存しました。';
 };
 
 const applyHistoryItem = (itemId) => {
   const item = state.history.find((historyItem) => String(historyItem.id) === String(itemId));
   if (!item) return;
-
-  state.mode = item.mode;
-  if (item.mode === 'free') {
-    state.freeEntries = item.freeEntries.map((entry) => ({ ...entry }));
-    ensureFreeEntryStructure({ forceTrailingBlank: true });
-    renderFreeInputs();
-  } else {
-    state.rangeConfig = { ...item.rangeConfig };
-    state.rangeEntries = [...item.rangeEntries];
-    state.rangeWeights = { ...item.rangeWeights };
-    dom.rangeStart.value = String(state.rangeConfig.start);
-    dom.rangeEnd.value = String(state.rangeConfig.end);
-    dom.rangeStep.value = String(state.rangeConfig.step);
-    renderRangePreview();
-  }
-  setMode(item.mode);
-  updateWheel();
-  closeMenuOnMobile();
-  dom.spinResult.textContent = '履歴の設定を読み込みました。';
+  const snapshot = buildSnapshotFromHistoryItem(item);
+  applyConfigurationSnapshot(snapshot);
+  showToast('保存済み設定を読み込みました。');
 };
 
 const deleteHistoryItem = (itemId) => {
@@ -676,26 +1239,73 @@ const deleteHistoryItem = (itemId) => {
   renderHistory();
 };
 
-const setupHistoryHandlers = () => {
-  dom.saveHistory.addEventListener('click', saveCurrentConfiguration);
-  dom.clearHistory.addEventListener('click', () => {
-    if (!state.history.length) return;
-    if (window.confirm('履歴をすべて削除しますか？')) {
-      state.history = [];
-      persistHistory();
-      renderHistory();
-    }
-  });
+const renameHistoryItem = (itemId) => {
+  const target = state.history.find((item) => String(item.id) === String(itemId));
+  if (!target) {
+    return;
+  }
+  const currentName = target.name || getDefaultHistoryName(target.mode, target.createdAt);
+  const nextName = window.prompt('新しい名前を入力してください。', currentName);
+  if (nextName === null) {
+    return;
+  }
+  const trimmed = nextName.trim();
+  target.name = trimmed || currentName;
+  persistHistory();
+  renderHistory();
+};
 
-  dom.historyList.addEventListener('click', (event) => {
-    const listItem = event.target.closest('.history-item');
-    if (!listItem) return;
-    const itemId = listItem.dataset.id;
-    if (event.target.matches('.history-load')) {
-      applyHistoryItem(itemId);
+const setupHistoryHandlers = () => {
+  dom.saveCurrentButtons.forEach((button) => {
+    button.addEventListener('click', saveCurrentConfiguration);
+  });
+  if (dom.clearHistory) {
+    dom.clearHistory.addEventListener('click', () => {
+      if (!state.history.length) return;
+      if (window.confirm('保存済みをすべて削除しますか？')) {
+        state.history = [];
+        persistHistory();
+        renderHistory();
+      }
+    });
+  }
+
+  if (dom.historyList) {
+    dom.historyList.addEventListener('click', (event) => {
+      const listItem = event.target.closest('.history-item');
+      if (!listItem) return;
+      const itemId = listItem.dataset.id;
+      if (event.target.matches('.history-rename')) {
+        renameHistoryItem(itemId);
+        return;
+      }
+      if (event.target.matches('.history-load')) {
+        applyHistoryItem(itemId);
+      }
+      if (event.target.matches('.history-delete')) {
+        if (window.confirm('この保存済み設定を削除してもよろしいですか？')) {
+          deleteHistoryItem(itemId);
+        }
+      }
+    });
+  }
+};
+
+const setupAutoHistoryHandlers = () => {
+  if (!dom.autoHistoryList) {
+    return;
+  }
+  dom.autoHistoryList.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-auto-action]');
+    if (!button) return;
+    const { autoAction, autoId } = button.dataset;
+    if (!autoId || !autoAction) return;
+    if (autoAction === 'load') {
+      applyAutoHistoryItem(autoId);
+      return;
     }
-    if (event.target.matches('.history-delete')) {
-      deleteHistoryItem(itemId);
+    if (autoAction === 'save') {
+      saveAutoHistoryItem(autoId);
     }
   });
 };
@@ -709,12 +1319,17 @@ const init = () => {
   setupMenuToggle();
   initializeFreeMode();
   initializeRangeMode();
-  setupModeSwitch();
+  setupTabSwitch();
+  updateTabUI();
   loadHistory();
   renderHistory();
+  loadAutoHistory();
+  renderAutoHistory();
   setupHistoryHandlers();
+  setupAutoHistoryHandlers();
   initSpin();
   updateWheel();
+  applyWheelState(state.mode);
 };
 
 if (document.readyState === 'loading') {
