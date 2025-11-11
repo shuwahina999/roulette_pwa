@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v0.0.13';
+const CACHE_VERSION = 'v0.1.0';
 const CACHE_NAME = `smart-roulette-${CACHE_VERSION}`;
 const CORE_ASSETS = [
   './',
