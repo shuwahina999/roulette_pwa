@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="utf-8">
+    <title>スマートルーレット</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#121212">
+    <link rel="manifest" href="./json/manifest.webmanifest">
+    <link rel="stylesheet" href="./css/styles.css">
+    <link rel="apple-touch-icon" href="./images/icon.svg">
+</head>
+<body class="theme-auto">
+    <noscript>このアプリを利用するにはJavaScriptを有効にしてください。</noscript>
+    <header class="app-header">
+        <button class="menu-toggle" id="menuToggle" aria-label="メニューを開閉" aria-expanded="false">
+            <span></span>
+            <span></span>
+            <span></span>
+        </button>
+        <div class="app-title">スマートルーレット</div>
+        <div class="header-actions">
+            <div class="theme-switch" role="group" aria-label="テーマ切り替え">
+                <button id="themeAuto" class="theme-btn" data-theme="auto" aria-pressed="true">Auto</button>
+                <button id="themeLight" class="theme-btn" data-theme="light" aria-pressed="false">Light</button>
+                <button id="themeDark" class="theme-btn" data-theme="dark" aria-pressed="false">Dark</button>
+            </div>
+            <button id="installButton" class="install-btn" hidden>インストール</button>
+        </div>
+    </header>
+    <nav class="primary-menu" role="tablist" aria-label="表示メニュー" data-role="primary-tabs">
+        <button class="mode-btn tab-btn active" data-tab="free" role="tab" aria-selected="true" aria-controls="freeMode">自由入力</button>
+        <button class="mode-btn tab-btn" data-tab="range" role="tab" aria-selected="false" aria-controls="rangeMode">範囲指定</button>
+        <button class="mode-btn tab-btn" data-tab="saved" role="tab" aria-selected="false" aria-controls="savedMode">保存済み</button>
+        <button class="mode-btn tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="historyMode">履歴</button>
+    </nav>
+    <div class="app-layout">
+        <nav class="side-panel" id="sidePanel">
+            <section class="panel-group tab-panel desktop-tabs">
+                <h2>メニュー</h2>
+                <div class="tab-buttons" role="tablist" aria-label="表示メニュー">
+                    <button class="mode-btn tab-btn active" data-tab="free" role="tab" aria-selected="true" aria-controls="freeMode">自由入力</button>
+                    <button class="mode-btn tab-btn" data-tab="range" role="tab" aria-selected="false" aria-controls="rangeMode">範囲指定</button>
+                    <button class="mode-btn tab-btn" data-tab="saved" role="tab" aria-selected="false" aria-controls="savedMode">保存済み</button>
+                    <button class="mode-btn tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="historyMode">履歴</button>
+                </div>
+            </section>
+            <section class="panel-group utility-panel">
+                <h2>その他</h2>
+                <button id="updateApp" class="history-btn" type="button">アップデートを確認</button>
+            </section>
+        </nav>
+        <main class="main-content">
+            <section class="mode-section" id="freeMode" role="tabpanel" aria-labelledby="freeModeHeading">
+                <div class="mode-section-header">
+                    <h2 id="freeModeHeading">自由入力モード</h2>
+                    <button class="history-btn save-current-btn" type="button" data-action="save-current" data-origin="free">現在の設定を保存</button>
+                </div>
+                <p class="section-description">項目を入力してください。最後の入力欄に文字を入力すると新しい欄が自動で追加されます。</p>
+                <div id="freeInputs" class="input-list" aria-live="polite"></div>
+            </section>
+            <section class="mode-section hidden" id="rangeMode" role="tabpanel" aria-labelledby="rangeModeHeading">
+                <div class="mode-section-header">
+                    <h2 id="rangeModeHeading">範囲指定モード</h2>
+                    <button class="history-btn save-current-btn" type="button" data-action="save-current" data-origin="range">現在の設定を保存</button>
+                </div>
+                <form id="rangeForm" class="range-form" autocomplete="off">
+                    <p class="range-note">開始値は終了値以下で指定してください。</p>
+                    <label>
+                        開始値
+                        <input type="number" id="rangeStart" name="rangeStart" min="-999999" value="1">
+                    </label>
+                    <label>
+                        終了値
+                        <input type="number" id="rangeEnd" name="rangeEnd" min="-999999" value="4">
+                    </label>
+                    <label>
+                        ステップ
+                        <input type="number" id="rangeStep" name="rangeStep" min="1" value="1">
+                    </label>
+                </form>
+                <div id="rangePreview" class="input-list" aria-live="polite"></div>
+            </section>
+            <section class="mode-section hidden" id="savedMode" role="tabpanel" aria-labelledby="savedModeHeading">
+                <div class="mode-section-header">
+                    <h2 id="savedModeHeading">保存済み設定</h2>
+                </div>
+                <p class="section-description">保存済みの設定を管理できます。設定を選ぶと該当のモードに切り替わります。</p>
+                <div class="history-controls">
+                    <button id="clearHistory" class="history-btn secondary" type="button">保存済みを全削除</button>
+                </div>
+                <ul id="historyList" class="history-list" aria-live="polite" aria-label="保存済みルーレット設定一覧"></ul>
+            </section>
+            <section class="mode-section hidden" id="historyMode" role="tabpanel" aria-labelledby="historyModeHeading">
+                <div class="mode-section-header">
+                    <h2 id="historyModeHeading">履歴</h2>
+                </div>
+                <p class="section-description">ルーレット結果を自動で保存しています。必要に応じて読み込んだり保存済みに追加できます。</p>
+                <ul id="autoHistoryList" class="auto-history-list" aria-live="polite" aria-label="自動保存された結果一覧"></ul>
+            </section>
+            <section class="wheel-section">
+                <h2>ルーレット</h2>
+                <div class="wheel-container">
+                    <div class="wheel-wrapper">
+                        <canvas id="wheelCanvas" width="320" height="320" aria-label="ルーレット盤"></canvas>
+                    </div>
+                    <div class="wheel-indicator" aria-hidden="true"></div>
+                </div>
+                <div class="wheel-actions">
+                    <button id="spinButton" class="spin-btn">回す</button>
+                    <div class="result" id="spinResult" aria-live="assertive"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="./js/pwa.js" defer></script>
+    <script src="./js/app.js" type="module" defer></script>
+    <div id="toast" class="toast" role="status" aria-live="polite" aria-hidden="true"></div>
+</body>
+</html>
